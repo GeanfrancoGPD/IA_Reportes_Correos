@@ -34,43 +34,60 @@ def _validate_from_field(from_value: str) -> bool:
     return bool(re.match(r"[^@]+@[^@]+\.[^@]+", addr))
 
 
-def send_invoice_email(to_email: str, invoice: dict, approve_link: str, reject_link: str):
+def send_invoice_email(to_email: str, invoice: dict, approve_link: str, reject_link: str, from_email: str | None = None):
+    """
+    Envía un email usando el SDK de Resend si está disponible.
+    - to_email: destinatario
+    - invoice: dict con datos de la factura
+    - approve_link, reject_link: URLs para los botones
+    - from_email: opcional, sobrescribe EMAIL_FROM de la env
+    """
     if not RESEND_API_KEY:
-        raise RuntimeError("RESEND_API_KEY no configurada.")
+        raise RuntimeError("RESEND_API_KEY no configurada. Establece la variable de entorno RESEND_API_KEY.")
 
-    if not FROM_EMAIL or not _validate_from_field(FROM_EMAIL):
-        raise RuntimeError("EMAIL_FROM inválida o no configurada. Use 'Name <email@domain.com>' o 'email@domain.com'.")
+    # Prioriza el from_email pasado como argumento; si no está, usa la env.
+    actual_from = from_email or FROM_EMAIL
+    if not actual_from or not _validate_from_field(actual_from):
+        raise RuntimeError("EMAIL_FROM inválida o no configurada. Use 'Name <email@domain.com>' o pase from_email al llamar la función.")
 
+    # Renderizar HTML
     html = Template(EMAIL_TEMPLATE).render(invoice=invoice, approve_link=approve_link, reject_link=reject_link)
 
-    payload = {
-        "from": FROM_EMAIL,
+    params = {
+        "from": actual_from,
         "to": [to_email],
         "subject": f"Revisión de factura {invoice.get('invoice_number','')}",
         "html": html
     }
 
-    # Intentar usar SDK oficial si está disponible
+    # Intentar usar SDK oficial (estilo mostrado en tu ejemplo)
     try:
-        from resend import Resend  # puede lanzar ImportError o AttributeError
-        resend = Resend(api_key=RESEND_API_KEY)
-        result = resend.emails.send(payload)
-        return {"ok": True, "provider": "resend-sdk", "result": result}
-    except (ImportError, AttributeError) as exc:
-        # SDK no disponible o no exporta 'Resend' - caer al fallback HTTP
+        import resend
+        # usar la API key como en tu snippet
+        resend.api_key = RESEND_API_KEY
+
+        # la llamada puede ser: resend.Emails.send(params) dependiendo de la versión del SDK
+        # algunas versiones retornan un objeto/resp; devolvemos ese resultado
+        email_resp = resend.Emails.send(params)
+        return {"ok": True, "provider": "resend-sdk", "result": email_resp}
+
+    except ImportError:
+        # SDK no instalado: usar fallback HTTP
         import requests
         headers = {
             "Authorization": f"Bearer {RESEND_API_KEY}",
             "Content-Type": "application/json"
         }
-        resp = requests.post("https://api.resend.com/emails", json=payload, headers=headers)
+        resp = requests.post("https://api.resend.com/emails", json=params, headers=headers)
         try:
             body = resp.json()
         except Exception:
             body = resp.text
         if resp.status_code not in (200, 202):
+            # Reenvía el mensaje de error tal cual (por ejemplo: dominio no verificado)
             raise RuntimeError(f"Error enviando email vía Resend: {body}")
         return {"ok": True, "provider": "resend-http", "result": body}
+
     except Exception as e:
-        # cualquier otro error del SDK
+        # Otros errores del SDK (p. ej. validación)
         raise RuntimeError(f"Error enviando email via Resend SDK: {e}")
